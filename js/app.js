@@ -65,6 +65,19 @@ function cameraPicker(deck, onIdle) {
 }
 const afterImport = async (d) => { const ps = await db.pagesOf(d.id); toast('取り込みました。隠したい所をなぞってみましょう'); nav.edit(d.id, ps[0].id); };
 
+// 名前などを1つ入力してもらう小窓。キャンセルは null
+function askText(title, value = '', placeholder = '') {
+  return new Promise((res) => {
+    let done = false; const fin = (v) => { if (done) return; done = true; close(); res(v); };
+    const inp = h('input.text-in', { type: 'text', value, placeholder, maxlength: 30, 'aria-label': title });
+    const close = sheet(title, h('form', { onsubmit: (e) => { e.preventDefault(); fin(inp.value.trim()); } }, inp,
+      h('div.row.end', { style: { marginTop: '12px' } }, h('button.btn', { type: 'button', onclick: () => fin(null) }, 'やめる'), h('button.btn.primary', { type: 'submit' }, '決定'))), { onClose: () => fin(null) });
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+// フォルダは教材の「folder」に名前を持たせるだけ（教材が1つも無くなったフォルダは自然に消える）
+const foldersOf = (decks) => [...new Set(decks.map((d) => d.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
+
 // ---------------- ホーム ----------------
 async function homeScreen() {
   const [decks, w, pages] = [await db.decks(), await getWallet(), await db.allPages()];
@@ -76,6 +89,7 @@ async function homeScreen() {
     s.pages++; s.masks += p.masks.length; if (!s.thumb) { s.thumb = p.thumb; s.first = p.id; }
     for (const m of p.masks) if (m.srs && m.srs.due <= now) { s.due++; dueAll++; }
   }
+  const folders = foldersOf(decks), closed = (await getSettings()).closedFolders || [];
   const exam = decks.filter((d) => d.examDate && d.examDate > now - DAY).sort((a, b) => a.examDate - b.examDate)[0];
   const todayN = w.days[todayKey()] || 0;
   const pick = filePicker(null, afterImport), cam = cameraPicker(null, () => homeScreen());
@@ -100,7 +114,12 @@ async function homeScreen() {
     h('header.app-head', h('div.brand', h('span.logo'), h('div', h('h1', 'ひらく'), h('span.muted', '暗記マーカー'))), coinPill(w)),
     h('main.content', hero,
       h('div.sec-head', h('h2', '教材'), decks.length ? null : h('button.btn', { onclick: async () => { const b = busy('サンプル教材を用意しています…'); try { const d = await createSampleDeck(); const ps = await db.pagesOf(d.id); nav.edit(d.id, ps[0].id); } finally { b.done(); } } }, icon('sparkle', 16), 'サンプルで試す')),
-      h('div.deck-grid', add, cards),
+      h('div.deck-grid', add, decks.map((d, i) => (d.folder ? null : cards[i]))),
+      folders.map((f) => { const list = decks.map((d, i) => (d.folder === f ? cards[i] : null)).filter(Boolean), due = decks.filter((d) => d.folder === f).reduce((n, d) => n + stat.get(d.id).due, 0);
+        return h('details.folder', { open: !closed.includes(f), ontoggle: async (e) => { const c = (await getSettings()).closedFolders || []; await saveSettings({ closedFolders: e.target.open ? c.filter((x) => x !== f) : [...new Set([...c, f])] }); } },
+          h('summary', icon('folder', 18), h('strong', f), h('span.muted', `${list.length}件`), due ? h('span.badge.inline', `復習 ${due}`) : null,
+            h('button.icon-btn.sm', { 'aria-label': `フォルダ「${f}」の名前を変える`, title: '名前を変える', onclick: async (e) => { e.preventDefault(); const n = await askText('フォルダの名前', f); if (n == null || n === f) return; for (const d of decks) if (d.folder === f) { d.folder = n; await db.putDeck(d); } toast(n ? `「${n}」に変えました` : 'フォルダをなくしました（教材は残っています）'); homeScreen(); } }, icon('edit', 15))),
+          h('div.deck-grid', list)); }),
       decks.length ? null : h('div.empty', h('p', 'いつもの教材を「答えの所だけ隠せる教材」に変えて、そのまま暗記・復習までできます。'),
         h('ol.steps', h('li', h('b', '取り込む'), '写真・画像・PDF'), h('li', h('b', '隠す'), 'なぞる／「光合成を隠して」と頼む'), h('li', h('b', '覚える'), 'タイマー → 自動で隠れてテスト'), h('li', h('b', '続ける'), '忘れかけた頃に復習・コインでごほうび'))),
       pick, cam),
@@ -136,6 +155,12 @@ async function deckScreen(id) {
   const title = h('input.title-in', { value: deck.title, 'aria-label': '教材の名前', onchange: async (e) => { deck.title = e.target.value.trim() || '名前のない教材'; await db.putDeck(deck); } });
   const exam = h('input.date-in', { type: 'date', value: deck.examDate ? todayKey(deck.examDate) : '', 'aria-label': '試験日', onchange: async (e) => { deck.examDate = e.target.value ? new Date(e.target.value + 'T09:00').getTime() : null; await db.putDeck(deck); toast(deck.examDate ? '試験日に間に合うよう、復習の間隔を調整します' : '試験日を外しました'); deckScreen(id); } });
   const left = deck.examDate ? Math.ceil((deck.examDate - now) / DAY) : null;
+  const allFolders = foldersOf(await db.decks());
+  const folderSel = h('select.text-in.folder-in', { 'aria-label': 'フォルダ', onchange: async (e) => {
+    let v = e.target.value;
+    if (v === '\u0000new') { v = await askText('新しいフォルダの名前', '', '例: 英語、日本史'); if (!v) return deckScreen(id); }
+    deck.folder = v; await db.putDeck(deck); toast(v ? `フォルダ「${v}」に入れました` : 'フォルダから出しました'); deckScreen(id);
+  } }, h('option', { value: '', selected: !deck.folder }, 'フォルダなし'), allFolders.map((f) => h('option', { value: f, selected: deck.folder === f }, f)), h('option', { value: '\u0000new' }, '＋ 新しいフォルダ…'));
 
   const pageCards = pages.map((p) => h('div.page-card',
     h('button.page-thumb', { onclick: () => nav.edit(id, p.id), 'aria-label': `${p.index + 1}ページ目を編集` }, h('img', { src: p.thumb, alt: '' }), maskOverlay(p)),
@@ -154,6 +179,7 @@ async function deckScreen(id) {
           h('button.act', { disabled: !(cnt.weak + cnt.mid), onclick: () => nav.studyDeck(id, 'weak') }, icon('map', 22), h('b', '苦手を集中'), h('small', `${cnt.weak + cnt.mid}か所`)),
           h('button.act', { disabled: !nq, onclick: () => nav.quiz(id) }, icon('cards', 22), h('b', '一問一答'), h('small', nq ? `${nq}問` : 'エディタで作成'))),
         h('div.row.between.wrap',
+          h('label.exam', icon('folder', 16), 'フォルダ', folderSel),
           h('label.exam', icon('cal', 16), '試験日', exam, left != null ? h('b.left', left >= 0 ? `あと${left}日` : '終了') : h('span.muted', '入れると復習計画が試験日に合わせて変わります')),
           h('div.legend', ['good', 'mid', 'weak', 'new'].map((k) => h('span', h('i', { style: { background: SCOL[k] } }), `${{ good: '◯ 覚えた', mid: '△ あいまい', weak: '✕ 苦手', new: '・ 未学習' }[k]} ${cnt[k]}`))))),
       h('div.sec-head.wrap', h('h2', 'ページ（色は覚え具合）'), h('div.row', h('button.btn', { onclick: () => cam.click() }, icon('camera', 16), '撮る'), h('button.btn', { onclick: () => pick.click() }, icon('plus', 16), 'ページを追加'))),

@@ -1,5 +1,7 @@
 // 線画アイコン（自作のSVG）
 const P = {
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>',
   marker: '<path d="M4 20h5l10.5-10.5a2.1 2.1 0 0 0 0-3L17.5 4.5a2.1 2.1 0 0 0-3 0L4 15v5z"/><path d="M12.5 6.5l5 5"/>',
   box: '<rect x="4" y="7" width="16" height="10" rx="2"/>',
   word: '<path d="M5 7V5h14v2M12 5v14M9 19h6"/>',
