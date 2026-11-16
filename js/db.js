@@ -22,12 +22,19 @@ export const db = {
   async decks() { return (await req((await store('decks')).getAll())).sort((a, b) => b.updated - a.updated); },
   async deck(id) { return req((await store('decks')).get(id)); },
   async putDeck(d) { d.updated = Date.now(); return req((await store('decks', 'readwrite')).put(d)); },
+  async putDeckRaw(d) { return req((await store('decks', 'readwrite')).put(d)); }, // 同期用: 更新時刻を書き換えない
   async page(id) { return req((await store('pages')).get(id)); },
   async pagesOf(deckId) { return (await req((await store('pages')).index('deck').getAll(deckId))).sort((a, b) => a.index - b.index); },
   async allPages() { return req((await store('pages')).getAll()); },
-  async putPage(p) { return req((await store('pages', 'readwrite')).put(p)); },
+  async putPage(p) { p.updated = Date.now(); return req((await store('pages', 'readwrite')).put(p)); },
+  async putPageRaw(p) { return req((await store('pages', 'readwrite')).put(p)); },
   async delPage(id) { return req((await store('pages', 'readwrite')).delete(id)); },
   async delDeck(id) {
+    // 同期している教材を消したら、ほかの端末と保管場所からも消すための印を残す
+    if ((await this.get('syncState', {}))[id]) { const t = await this.get('syncTomb', {}); t[id] = Date.now(); await this.set('syncTomb', t); }
+    return this.delDeckRaw(id);
+  },
+  async delDeckRaw(id) {
     for (const p of await this.pagesOf(id)) await this.delPage(p.id);
     return req((await store('decks', 'readwrite')).delete(id));
   },
@@ -39,6 +46,7 @@ export const db = {
 // ---- 設定 ----
 export const DEFAULT_SETTINGS = {
   timer: 60, fingerDraws: true, autoFit: true, snap: true, markerSize: 'M', loupe: true, penPalm: true,
+  syncOn: false, syncRepo: '', syncToken: '', syncApi: '',
   aiEnabled: false, aiKey: '', aiModel: 'claude-opus-5-5', ocrLang: 'jpn+eng', sound: true,
 };
 let settings = null;

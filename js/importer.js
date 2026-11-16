@@ -214,7 +214,7 @@ export async function importFiles(files, deck, opts = {}) {
 
 // ページの画像を差し替える（ゆがみ補正のあと）。文字の位置が変わるので、読み取り結果と隠しは作り直しになる。
 export async function replacePageImage(page, canvas) {
-  page.blob = await canvasToBlob(canvas, 'image/jpeg', 0.92);
+  page.blob = await canvasToBlob(canvas, 'image/jpeg', 0.92); page.imgRev = (page.imgRev || 0) + 1; // 画像を差し替えたら版を上げる（同期で送り直すため）
   page.w = canvas.width; page.h = canvas.height; page.thumb = thumbOf(canvas);
   page.lines = null; page.ocrState = 'none'; page.masks = [];
   await db.putPage(page);

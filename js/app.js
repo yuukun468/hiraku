@@ -8,6 +8,7 @@ import { openStudy, openQuiz, dueItems, strength, GRADES } from './study.js';
 import { getWallet, applyWallpaper, WALLPAPERS, MARKERS, COIN_RULES, buy, equip, markerFill, mergeWallet, owns } from './rewards.js';
 import { env, initPwa, onPwaChange, canInstall, promptInstall, swState, offlineInfo, saveOffline } from './pwa.js';
 import { aiTest } from './ai.js';
+import { syncNow, autoSync, syncReady } from './sync.js';
 import { outline } from './geom.js';
 
 const root = document.getElementById('app');
@@ -102,6 +103,7 @@ async function homeScreen() {
     for (const m of p.masks) if (m.srs && m.srs.due <= now) { s.due++; dueAll++; }
   }
   const folders = foldersOf(decks), closed = (await getSettings()).closedFolders || [];
+  autoSync((r) => { if (document.body.dataset.screen === 'home') { toast(`ほかの端末の変更を取り込みました（${r.down + r.merged + r.removed}件）`); homeScreen(); } });
   const exam = decks.filter((d) => d.examDate && d.examDate > now - DAY).sort((a, b) => a.examDate - b.examDate)[0];
   const todayN = w.days[todayKey()] || 0;
   const pick = filePicker(null, afterImport), cam = cameraPicker(null, () => homeScreen());
@@ -264,6 +266,18 @@ async function settingsScreen() {
         h('label.field', h('span', '読み取る言語（端末内で処理）'), h('select.text-in', { onchange: async (e) => { await saveSettings({ ocrLang: e.target.value }); } },
           [['jpn+eng', '日本語＋英語'], ['jpn', '日本語のみ'], ['eng', '英語のみ']].map(([v, l]) => h('option', { value: v, selected: s.ocrLang === v }, l))))),
       phonePanel,
+      h('section.panel', h('h3', '端末間の同期（自分の GitHub に保管）'),
+        h('p.muted', 'PC・スマホ・iPad で同じ教材と学習記録を使えるようにします。保管場所は、自分の GitHub の「非公開（Private）」リポジトリです。入れた鍵はこの端末の中だけに保存します。'),
+        tog('同期を使う', 'syncOn', 'オンにすると、ホームを開いたときに自動で同期します（2分に1回まで）'),
+        s.syncOn ? h('div.col.gap',
+          h('label.field', h('span', '保管場所（ユーザー名/リポジトリ名）'), h('input.text-in', { type: 'text', value: s.syncRepo, placeholder: '例: yuukun468/hiraku-data', autocomplete: 'off', autocapitalize: 'off', spellcheck: false, onchange: async (e) => { await saveSettings({ syncRepo: e.target.value.trim() }); } })),
+          h('label.field', h('span', '鍵（アクセストークン。この端末の中だけに保存）'), h('input.text-in', { type: 'password', value: s.syncToken, placeholder: 'github_pat_…', autocomplete: 'off', onchange: async (e) => { await saveSettings({ syncToken: e.target.value.trim() }); } })),
+          h('div.row.wrap', h('button.btn.primary', { onclick: async () => {
+            const b = busy('同期しています…');
+            try { const r = await syncNow((t, p) => b.set(t || null, p)); toast(`同期しました（送信 ${r.up}・受信 ${r.down}・統合 ${r.merged}・削除 ${r.removed}）`); }
+            catch (e) { console.error(e); toast('同期できませんでした: ' + (e.message || e)); } finally { b.done(); settingsScreen(); }
+          } }, '今すぐ同期する'),
+            h('span.muted.small', s.syncLast ? `前回: ${new Date(s.syncLast).toLocaleString('ja-JP')}　${s.syncNote || ''}` : (s.syncNote || 'まだ同期していません')))) : null),
       h('section.panel', h('h3', 'データ・容量（端末の引っ越しもここから）'),
         storeBox,
         h('p.muted', '教材・隠した場所・学習記録は、このブラウザの中だけに保存されます。別の端末へ移すとき・容量を空けたいときは「書き出す」→ できたファイルを保存（または相手の端末へ送る）→ 使うときに「読み込む」。引いたマーカーも学習記録も、そのまま戻ります。'),
