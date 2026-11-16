@@ -55,7 +55,7 @@ export function analyze(pageId, img, pw, ph) {
     for (let x = 0; x < W; x++) { row += gray[y * W + x]; integ[(y + 1) * (W + 1) + x + 1] = integ[y * (W + 1) + x + 1] + row; }
   }
   const R = Math.max(8, Math.round(Math.max(W, H) / 60));
-  const ink = new Uint8Array(W * H);
+  const ink = new Uint8Array(W * H), dark = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
     const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
     for (let x = 0; x < W; x++) {
@@ -63,16 +63,90 @@ export function analyze(pageId, img, pw, ph) {
       const sum = integ[y1 * (W + 1) + x1] - integ[y0 * (W + 1) + x1] - integ[y1 * (W + 1) + x0] + integ[y0 * (W + 1) + x0];
       const mean = sum / ((x1 - x0) * (y1 - y0));
       const g = gray[y * W + x];
-      if (g < mean - 22 || g < 70) ink[y * W + x] = 1;
+      if (g < mean - 22 || g < 70) {
+        const i = y * W + x; ink[i] = 1; dark[i] = Math.max(0, Math.min(255, mean - g));
+        // 細いペンの線は、ふちがにじんで「明るい色」に見える。濃い彩度なら蛍光マーカーではなく色ペンの字として扱う
+        if (cls[i] >= 5) { const p = i * 4, mx = Math.max(data[p], data[p + 1], data[p + 2]), mn = Math.min(data[p], data[p + 1], data[p + 2]); if ((mx - mn) / mx > 0.45) cls[i] = cls[i] === 5 ? 1 : cls[i] === 6 ? 3 : 2; }
+      }
     }
   }
-  const map = { W, H, k, ink, cls, textH: 0 };
-  map.textH = estimateTextHeight(map);
+  const map = { W, H, k, ink, cls, dark, textH: 0, vertical: false };
+  map.vertical = detectVertical(map);
+  map.textH = map.vertical ? estimateTextHeight(transposed(map)) : estimateTextHeight(map);
   cache.set(pageId, map);
   if (cache.size > 6) cache.delete(cache.keys().next().value);
   return map;
 }
 export const dropInk = (pageId) => cache.delete(pageId);
+
+// 縦書きのページは、x と y を入れ替えた「転置ビュー」で横書きと同じ処理に通す
+function transposed(m) {
+  if (m.T) return m.T;
+  const { W, H } = m, tr = (a) => { const o = new Uint8Array(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) o[x * H + y] = a[y * W + x]; return o; };
+  return (m.T = { W: H, H: W, k: m.k, ink: tr(m.ink), cls: tr(m.cls), dark: tr(m.dark), textH: m.textH, vertical: false });
+}
+const swapBox = (b) => ({ x0: b.y0, y0: b.x0, x1: b.y1, y1: b.x1 });
+
+// インクの連結成分（8近傍）。lab[i] = 成分番号+1、boxes[番号] = { x0, y0, x1, y1, n }
+function components(m) {
+  if (m.comps) return m.comps;
+  const { W, H, ink } = m, lab = new Int32Array(W * H), boxes = [], stack = [];
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (!ink[s0] || lab[s0]) continue;
+    const id = boxes.length + 1, b = { x0: W, y0: H, x1: 0, y1: 0, n: 0 };
+    stack.push(s0); lab[s0] = id;
+    while (stack.length) {
+      const p = stack.pop(), x = p % W, y = (p / W) | 0; b.n++;
+      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const X = x + dx, Y = y + dy; if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+        const z = Y * W + X; if (ink[z] && !lab[z]) { lab[z] = id; stack.push(z); }
+      }
+    }
+    boxes.push(b);
+  }
+  return (m.comps = { lab, boxes });
+}
+
+// 縦書きかどうか: かな・漢字くらいの大きさのかたまりについて「いちばん近いとなり」が上下にあるか左右にあるかを数える。
+// 横書きは字間 < 行間なので左右、縦書きは上下が多くなる。はっきり上下が多いときだけ縦書きとする。
+function detectVertical(m) {
+  const { boxes } = components(m);
+  const sz = boxes.map((b) => Math.max(b.x1 - b.x0, b.y1 - b.y0) + 1).filter((v) => v >= 6).sort((a, b) => a - b);
+  if (sz.length < 30) return false;
+  const med = sz[sz.length >> 1];
+  const cs = boxes.filter((b) => { const w = b.x1 - b.x0 + 1, h = b.y1 - b.y0 + 1; return Math.max(w, h) >= med * 0.5 && Math.max(w, h) <= med * 2.2 && w / h < 2.5 && h / w < 2.5; });
+  if (cs.length < 30) return false;
+  const cell = med * 3, grid = new Map(), key = (x, y) => Math.floor(x / cell) + ':' + Math.floor(y / cell);
+  for (const b of cs) { const k2 = key((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); (grid.get(k2) || grid.set(k2, []).get(k2)).push(b); }
+  let hor = 0, ver = 0; const votes = [];
+  for (const a of cs) {
+    const ax = (a.x0 + a.x1) / 2, ay = (a.y0 + a.y1) / 2; let best = null, bd = med * 2.5;
+    for (let gy = -1; gy <= 1; gy++) for (let gx = -1; gx <= 1; gx++) for (const b of grid.get(key(ax + gx * cell, ay + gy * cell)) || []) {
+      if (b === a) continue;
+      const dx = Math.max(0, Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1)), dy = Math.max(0, Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1)), d = Math.hypot(dx, dy);
+      if (d < bd) { bd = d; best = [dx, dy, Math.abs((b.x0 + b.x1) / 2 - ax), Math.abs((b.y0 + b.y1) / 2 - ay)]; }
+    }
+    if (!best) continue;
+    const sz2 = Math.max(a.x1 - a.x0, a.y1 - a.y0) + 1;
+    if (best[2] > best[3] * 1.5) { hor++; votes.push([ax, ay, 0, sz2]); } else if (best[3] > best[2] * 1.5) { ver++; votes.push([ax, ay, 1, sz2]); }
+  }
+  m.orient = { hor, ver }; m.votes = votes;
+  return ver > hor * 1.5 && ver > 20;
+}
+// 箱（ページ座標）のあたりが縦書きかどうか。横書きと縦書きが混ざったページ用
+function localVertical(m, b) {
+  const r = m.textH * 2.5, x0 = b.x0 * m.k - r, y0 = b.y0 * m.k - r, x1 = b.x1 * m.k + r, y1 = b.y1 * m.k + r; let hor = 0, ver = 0;
+  for (const [x, y, v, sz] of m.votes || []) if (x >= x0 && x <= x1 && y >= y0 && y <= y1) { if (v) ver += sz; else hor += sz; }
+  return hor + ver === 0 ? m.vertical : ver > hor;
+}
+// 横書き用の処理 run を、ページの向きに合わせて実行する。混在ページでは両方の向きで走らせ、その場所の向きに合う結果だけ残す
+function oriented(m, run) {
+  const o = m.orient || { hor: 1, ver: 0 }, T = () => Object.assign(transposed(m), { textH: m.textH });
+  const mixed = Math.min(o.hor, o.ver) > 15 && Math.min(o.hor, o.ver) > Math.max(o.hor, o.ver) * 0.5;
+  if (!mixed) return m.vertical ? run(T()).map(swapBox) : run(m);
+  return [...run(m).filter((b) => !localVertical(m, b)), ...run(T()).map(swapBox).filter((b) => localVertical(m, b))];
+}
 
 // 縦方向のインク連続長の代表値 ≒ 文字の高さの目安
 function estimateTextHeight(m) {
@@ -206,7 +280,10 @@ export function fitStroke(m, strokePts, { fallbackHalf, snap = true } = {}) {
     return q.map((_, i) => { let s = 0, cnt = 0; for (let j = Math.max(0, i - win); j <= Math.min(n - 1, i + win); j++) { s += q[j]; cnt++; } return s / cnt; });
   };
   // 3) 同じ字の離れた画（「三」の上の線、濁点など）を取り込む: 行の帯＋少しの余裕に「丸ごと」収まる小さな成分だけ
-  const margin = Hc * 0.32, capExt = Hc * 1.15;
+  const sizes = [];
+  for (const cp of comps) { let i0 = Infinity, i1 = -Infinity; for (const q of cp.pix) { const i = idx[q]; if (i < i0) i0 = i; if (i > i1) i1 = i; } const sz = Math.max(cp.maxT - cp.minT + 1, (i1 - i0 + 1) * step); if (sz >= 6 && Math.abs(cp.minT + cp.maxT) / 2 < R * 0.7) sizes.push(sz); }
+  const Tl = sizes.length >= 3 ? Math.min(pct(sizes, 0.75), Hc * 2.2) : Hc;
+  const margin = Math.max(Hc * 0.32, Tl * 0.3), capExt = Math.max(Hc * 1.15, Tl * 0.72);
   for (let round = 0; round < 3; round++) {
     const U0 = fill(rawUp), D0 = fill(rawDn); let added = false;
     for (const cp of comps) {
@@ -264,7 +341,8 @@ export function tightenBox(m, b, padRatio = 0.12) {
 }
 
 // 色クラスの領域を箱として抽出（赤字だけ・マーカー部分だけ）
-export function colorRegions(m, wanted) {
+export const colorRegions = (m, wanted) => oriented(m, (fr) => colorRegionsH(fr, wanted));
+function colorRegionsH(m, wanted) {
   const { W, H, cls, ink, k, textH } = m;
   const set = new Set(wanted);
   const isText = wanted.some((w) => w <= 3);
@@ -306,13 +384,25 @@ export function colorRegions(m, wanted) {
     boxes.push({ x0: (x0 - pad) / k, y0: (y0 - pad) / k, x1: (x1 + 1 + pad) / k, y1: (y1 + 1 + pad) / k });
   }
   // 同じ行で、すき間が半文字未満の箱は1語としてつなぐ（カタカナなど字間の広い語が割れないように）
+  // 手書きは字間が広いので、すき間が1文字ぶん程度まででも「間にほかの色の字が無ければ」同じ語としてつなぐ
   const lim = (textH * 0.5) / k;
+  const foreignBetween = (a, b) => {
+    const gx0 = Math.round(Math.min(a.x1, b.x1) * k), gx1 = Math.round(Math.max(a.x0, b.x0) * k), gy0 = Math.round(Math.max(a.y0, b.y0) * k), gy1 = Math.round(Math.min(a.y1, b.y1) * k);
+    let n = 0;
+    for (let x = Math.max(0, gx0); x <= Math.min(W - 1, gx1); x++) {
+      let c = 0; for (let y = Math.max(0, gy0); y <= Math.min(H - 1, gy1); y++) if (ink[y * W + x] && !set.has(cls[y * W + x])) c++;
+      if (c >= (gy1 - gy0 + 1) * 0.6) return true; // 間に仕切りの線（表の罫線など）がある
+      if (c >= 3) n += c; // ノートの罫線（横に1〜2画素）が通っているだけなら、間に字があるとは数えない
+    }
+    return n > Math.max(6, (gx1 - gx0 + 1) * (gy1 - gy0 + 1) * 0.04);
+  };
   for (let merged = true; merged;) {
     merged = false;
     outer: for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
       const a = boxes[i], b = boxes[j];
       const oy = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0), gap = Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1);
-      if (oy > Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.5 && gap < lim) {
+      const hmin = Math.min(a.y1 - a.y0, b.y1 - b.y0);
+      if (oy > hmin * 0.5 && (gap < lim || (isText && gap < Math.min(hmin * 1.7, (textH * 2.2) / k) && !foreignBetween(a, b)))) {
         boxes[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
         boxes.splice(j, 1); merged = true; break outer;
       }
@@ -322,6 +412,138 @@ export function colorRegions(m, wanted) {
   return boxes;
 }
 
+// 下線（縦書きでは傍線）を引いた語と、丸や四角で囲んだ語を見つける。色は問わない（鉛筆でも可）。
+// 返り値: { under: [箱], boxed: [箱] }（ページ座標）
+export function markedRegions(m) {
+  if (m.marks) return m.marks;
+  const get = (fr) => fr.fm || (fr.fm = findMarks(fr));
+  const under = oriented(m, (fr) => get(fr).under);
+  // 囲みは向きに関係ない形なので、横向きの枠で1回だけ探す
+  const boxed = get(m).boxed;
+  const inBox = (u) => boxed.some((b) => { const ox = Math.min(u.x1, b.x1) - Math.max(u.x0, b.x0), oy = Math.min(u.y1, b.y1) - Math.max(u.y0, b.y0); return ox > 0 && oy > 0 && ox * oy > (u.x1 - u.x0) * (u.y1 - u.y0) * 0.5; });
+  return (m.marks = { under: under.filter((u) => !inBox(u)), boxed });
+}
+function findMarks(m) {
+  const { W, H, ink, dark, cls, k } = m, T = m.textH;
+  const toPage = (b) => ({ x0: b.x0 / k, y0: b.y0 / k, x1: (b.x1 + 1) / k, y1: (b.y1 + 1) / k });
+  // --- 下線: 「細くて横に長い線」を探す ---
+  const thinMax = Math.max(3, Math.round(T * 0.2)), thin = new Uint8Array(W * H);
+  for (let x = 0; x < W; x++) for (let y = 0; y < H;) {
+    if (!ink[y * W + x]) { y++; continue; }
+    const y0 = y; while (y < H && ink[y * W + x]) y++;
+    if (y - y0 <= thinMax) for (let j = y0; j < y; j++) thin[j * W + x] = 1;
+  }
+  // ページの字の濃さの代表値。ノートの罫線は字よりずっと薄いので、これと比べて除く
+  const dsamp = []; for (let i = 0; i < W * H; i += 7) if (ink[i]) dsamp.push(dark[i]);
+  const minDark = Math.max(40, (dsamp.length ? pct(dsamp, 0.5) : 60) * 0.6);
+  // ノートの罫線がある行: 薄くて細い画素が、その行に横に広くたまっている
+  const ruleRow = new Uint8Array(H);
+  for (let y = 0; y < H; y++) { let c = 0; for (let x = 0; x < W; x++) { const i = y * W + x; if (thin[i] && dark[i] < minDark * 1.15) c++; } if (c > W * 0.07) for (let j = Math.max(0, y - 2); j <= Math.min(H - 1, y + 2); j++) ruleRow[j] = 1; }
+  let segs = []; const stack = [];
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (thin[s0] !== 1) continue;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, n = 0, dsum = 0, col = 0; const pix = [];
+    stack.push(s0); thin[s0] = 2;
+    while (stack.length) {
+      const p = stack.pop(), x = p % W, y = (p / W) | 0; n++; dsum += dark[p]; if (cls[p]) col++; pix.push(p);
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const X = x + dx, Y = y + dy; if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+        const z = Y * W + X; if (thin[z] === 1) { thin[z] = 2; stack.push(z); }
+      }
+    }
+    const w = x1 - x0 + 1, hh = y1 - y0 + 1;
+    if (w < T * 0.6 || w > W * 0.6 || hh > Math.max(T * 0.4, w * 0.1)) continue;
+    // うすい罫線は除く。罫線の上に字が乗っていると平均は濃くなるので、線の中の「薄い方の4分の1」で見る
+    if (col / n < 0.5 && (dsum / n < minDark || pct(pix.map((p) => dark[p]), 0.25) < minDark * 0.8)) continue;
+    if (col / n < 0.5 && ruleRow[(y0 + y1) >> 1] && dsum / n < minDark * 1.4) continue; // 罫線の上にある線は、はっきり濃いものだけ下線とみなす
+    const cols = new Uint8Array(w); let cov = 0; for (const p of pix) { const c = (p % W) - x0; if (!cols[c]) { cols[c] = 1; cov++; } }
+    if (cov / w < 0.85) continue;
+    segs.push({ x0, y0, x1, y1, d: Math.round(dsum / n), q: pct(pix.map((p) => dark[p]), 0.25), c: +(col / n).toFixed(2) });
+  }
+  // 途切れた線をつなぐ（字の払いと交わった所など）
+  for (let merged = true; merged;) {
+    merged = false;
+    outer: for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+      const a = segs[i], b = segs[j];
+      if (Math.abs((a.y0 + a.y1) - (b.y0 + b.y1)) / 2 < T * 0.3 && Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1) < T * 0.8) {
+        segs[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), d: Math.min(a.d, b.d), q: Math.min(a.q, b.q), c: a.c }; segs.splice(j, 1); merged = true; break outer;
+      }
+    }
+  }
+  const under = [], comp = components(m);
+  for (const sg of segs) {
+    const w = sg.x1 - sg.x0 + 1; if (w < T * 1.3) continue;
+    // 表の罫線や大きな枠の一部は下線ではない（線が属するかたまりが縦にも横にも大きい）
+    // 字の画の一部（大きな漢字の横線など）も下線ではない（かたまりが線の長さに比べて縦に大きい）
+    let big = false;
+    for (let x = sg.x0; x <= sg.x1 && !big; x += 3) for (let y = sg.y0; y <= sg.y1; y++) { const id = comp.lab[y * W + x]; if (id) { const cb = comp.boxes[id - 1], ch = cb.y1 - cb.y0 + 1; if ((ch > T * 4 && cb.x1 - cb.x0 > T * 4) || (ch > w * 0.55 && cb.x1 - cb.x0 < w * 1.6)) big = true; break; } }
+    if (big) continue;
+    // その場所の字の大きさ（ページの中で字の大きさが違っても合うように、線の上にあるかたまりから見積もる）
+    const near = [];
+    for (const cb of comp.boxes) {
+      if (cb.x1 < sg.x0 || cb.x0 > sg.x1 || cb.y1 > sg.y0 + 1 || cb.y1 < sg.y0 - T * 3.5) continue;
+      const cw = cb.x1 - cb.x0 + 1, ch = cb.y1 - cb.y0 + 1; if (Math.max(cw, ch) >= 6 && cw / ch < 3 && ch / cw < 3) near.push(Math.max(cw, ch));
+    }
+    const Tl = Math.min(T * 3, Math.max(T, near.length ? pct(near, 0.75) : T));
+    if (w < Tl * 1.1) continue; // 1文字より短い線は、字の画（「土」の下の線など）のことが多い
+    // 字の一部（口・土の下の線など）は、上の画とつながっている。つながりが多い線は下線ではない
+    let attached = 0;
+    for (let x = sg.x0; x <= sg.x1; x++) {
+      let top = -1; for (let y = sg.y0; y <= sg.y1; y++) if (thin[y * W + x]) { top = y; break; }
+      if (top < 1) continue;
+      let run = 0; for (let y = top - 1; y >= 0 && ink[y * W + x] && run < thinMax * 3; y--) run++;
+      if (run >= thinMax * 2) attached++;
+    }
+    if (attached / w > 0.15) continue;
+    // 線のすぐ上にある文字の帯を探す
+    const cap = Math.round(Tl * 1.7), startMax = Tl * 0.6, gapMax = Math.max(2, Tl * 0.22);
+    let bot = -1, topY = -1, gap = 0, inkSum = 0;
+    for (let d = 1; d <= cap; d++) {
+      const y = sg.y0 - d; if (y < 0) break;
+      let c = 0; for (let x = sg.x0; x <= sg.x1; x++) c += ink[y * W + x];
+      if (c > 0) { if (bot < 0) bot = y; topY = y; gap = 0; inkSum += c; if (bot - topY > Tl * 1.5) break; }
+      else if (bot < 0) { if (d > startMax) break; } else if (++gap > gapMax) break;
+    }
+    if (bot < 0 || bot - topY + 1 < Tl * 0.45 || inkSum < w * (bot - topY + 1) * 0.04) continue;
+    // 横は、帯の中のインクに合わせて少しだけ広げる／せばめる
+    let ax0 = sg.x1, ax1 = sg.x0; const ex = Math.round(T * 0.25);
+    for (let y = topY; y <= bot; y++) for (let x = Math.max(0, sg.x0 - ex); x <= Math.min(W - 1, sg.x1 + ex); x++) if (ink[y * W + x]) { if (x < ax0) ax0 = x; if (x > ax1) ax1 = x; }
+    const pad = Math.max(1.5, (bot - topY) * 0.08);
+    under.push({ x0: Math.min(ax0, sg.x0) - pad, y0: topY - pad, x1: Math.max(ax1, sg.x1) + pad, y1: bot + pad });
+  }
+  // 二重下線などで重なった箱は1つに
+  for (let merged = true; merged;) {
+    merged = false;
+    outer: for (let i = 0; i < under.length; i++) for (let j = i + 1; j < under.length; j++) {
+      const a = under[i], b = under[j];
+      const ox = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), oy = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      if (oy > Math.min(a.y1 - a.y0, b.y1 - b.y0) * 0.5 && ox > -T * 0.3) {
+        under[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) }; under.splice(j, 1); merged = true; break outer;
+      }
+    }
+  }
+  // --- 囲み: 輪になっていて、中に字がある成分 ---
+  const { lab, boxes } = components(m), boxed = [], sw = Math.max(2, T * 0.09);
+  boxes.forEach((b, bi) => {
+    const w = b.x1 - b.x0 + 1, hh = b.y1 - b.y0 + 1, id = bi + 1;
+    if (Math.min(w, hh) < T * 1.1 || !(Math.min(w, hh) >= T * 1.3 || Math.max(w, hh) >= T * 2) || hh > T * 4.5 || w > W * 0.45 || w > hh * 9 || b.n / (w * hh) > 0.5) return;
+    // 輪の外から塗りつぶして、届かなかった所＝囲まれた内側
+    const gw = w + 2, gh = hh + 2, g = new Uint8Array(gw * gh); // 1 = 壁（成分を1画素ふとらせたもの）, 2 = 外側
+    for (let y = 0; y < hh; y++) for (let x = 0; x < w; x++) if (lab[(b.y0 + y) * W + b.x0 + x] === id) for (let dy = 0; dy <= 2; dy++) for (let dx = 0; dx <= 2; dx++) g[(y + dy) * gw + x + dx] = 1;
+    const st = [];
+    for (let x = 0; x < gw; x++) { st.push(x, (gh - 1) * gw + x); } for (let y = 0; y < gh; y++) { st.push(y * gw, y * gw + gw - 1); }
+    while (st.length) { const p = st.pop(); if (g[p]) continue; g[p] = 2; const x = p % gw, y = (p / gw) | 0; if (x > 0) st.push(p - 1); if (x < gw - 1) st.push(p + 1); if (y > 0) st.push(p - gw); if (y < gh - 1) st.push(p + gw); }
+    let enclosed = 0, other = 0;
+    for (let y = 0; y < hh; y++) for (let x = 0; x < w; x++) if (g[(y + 1) * gw + x + 1] !== 2) { const p = (b.y0 + y) * W + b.x0 + x; if (g[(y + 1) * gw + x + 1] === 0) enclosed++; if (ink[p] && lab[p] !== id) other++; }
+    const inside = other + Math.max(0, b.n - 2 * (w + hh) * sw * 1.3);
+    if (enclosed / (w * hh) < 0.3 || inside < Math.max(8, w * hh * 0.015)) return;
+    boxed.push({ x0: b.x0 - 1, y0: b.y0 - 1, x1: b.x1 + 1, y1: b.y1 + 1 });
+  });
+  const order = (a, b) => (Math.abs(a.y0 - b.y0) < (a.y1 - a.y0) * 0.6 ? a.x0 - b.x0 : a.y0 - b.y0);
+  return { under: under.sort(order).map(toPage), boxed: boxed.sort(order).map(toPage) };
+}
+
 // ページにどの色がどれだけあるか（取込直後の「ワンタップ提案」用）
 export function colorSummary(m) {
   const out = [];
@@ -329,5 +551,8 @@ export function colorSummary(m) {
     const n = colorRegions(m, ids).length;
     if (n) out.push({ name, ids, count: n });
   }
+  const mk = markedRegions(m);
+  if (mk.under.length) out.push({ name: m.vertical ? '傍線の語' : '下線の語', ids: ['under'], count: mk.under.length });
+  if (mk.boxed.length) out.push({ name: '囲みの語', ids: ['boxed'], count: mk.boxed.length });
   return out;
 }

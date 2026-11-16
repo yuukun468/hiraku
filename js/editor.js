@@ -5,7 +5,7 @@ import { h, uid, toast, sheet, confirmSheet, busy, clamp, makeCanvas } from './u
 import { icon } from './icons.js';
 import { PageView, drawMask, bindPointers, zoomControls } from './view.js';
 import * as G from './geom.js';
-import { analyze, fitStroke, tightenBox, colorRegions, colorSummary, dropInk } from './ink.js';
+import { analyze, fitStroke, tightenBox, colorRegions, colorSummary, markedRegions, dropInk } from './ink.js';
 import { ensureText, ocrPage, replacePageImage } from './importer.js';
 import { adjustPhoto } from './scan.js';
 import { searchTerm, findEnglish, findNumbers, findImportantLocal, boxesToHits, parseSelection, parseCommand, clozeQuestions, norm } from './search.js';
@@ -79,7 +79,7 @@ export async function openEditor(root, { deckId, pageId, nav }) {
   stage.append(selBar, hint, mkPop); renderMk();
 
   const chips = h('div.cmd-chips');
-  const input = h('input.cmd-input', { type: 'text', placeholder: '例:「光合成を隠して」「赤字だけ」「重要語句」', 'aria-label': 'ことばで指示', enterKeyHint: 'send' });
+  const input = h('input.cmd-input', { type: 'text', placeholder: '例:「光合成を隠して」「赤字だけ」「下線の語」', 'aria-label': 'ことばで指示', enterKeyHint: 'send' });
   const micBtn = speechAvailable ? h('button.icon-btn.mic', { 'aria-label': '声で指示する', onclick: () => voice() }, icon('mic')) : null;
   const cmdBar = h('footer.cmd-bar', chips, h('form.cmd-row', { onsubmit: (e) => { e.preventDefault(); const v = input.value; input.value = ''; input.blur(); runCommand(v); } },
     icon('sparkle'), input, micBtn, h('button.icon-btn.send', { type: 'submit', 'aria-label': '実行' }, icon('send'))));
@@ -343,7 +343,7 @@ export async function openEditor(root, { deckId, pageId, nav }) {
   }
   async function colorHits(ids, label) {
     const out = [];
-    for (const p of pages) out.push(...boxesToHits(p, colorRegions(await inkOf(p), ids), label));
+    for (const p of pages) { const m = await inkOf(p); out.push(...boxesToHits(p, ids[0] === 'under' ? markedRegions(m).under : ids[0] === 'boxed' ? markedRegions(m).boxed : colorRegions(m, ids), label)); }
     return out;
   }
   async function runCommand(text) {
@@ -413,12 +413,24 @@ export async function openEditor(root, { deckId, pageId, nav }) {
   }
 
   // 番号付きの一覧（③）。「全部」「3番だけ」「1と4」を、タップ・入力・声のどれでも選べる。
+  // 文字として読めていない所（手書きなど）は、その場所の切り抜きを見せて選べるようにする
+  function cropOf(ht) {
+    const b = ht.box, bw = b.x1 - b.x0, bh = b.y1 - b.y0, tall = bh > bw * 1.6;
+    const mx = tall ? bw * 0.5 : Math.min(bh * 1.2, 60), my = tall ? Math.min(bw * 0.6, 40) : bh * 0.25;
+    const sx = Math.max(0, b.x0 - mx), sy = Math.max(0, b.y0 - my), sw = bw + mx * 2, sh = bh + my * 2;
+    const k = Math.min((tall ? 96 : 44) / sh, 230 / sw), cw = Math.max(24, Math.round(sw * k)), chh = Math.max(20, Math.round(sh * k));
+    const c = h('canvas.hit-crop', { width: cw * 2, height: chh * 2, style: { width: cw + 'px', height: chh + 'px' } });
+    const p = pages.find((x) => x.id === ht.pageId);
+    if (p) getImg(p).then((img) => { const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      ctx.fillStyle = 'rgba(255, 200, 0, .28)'; ctx.fillRect((b.x0 - sx) * k * 2, (b.y0 - sy) * k * 2, bw * k * 2, bh * k * 2); }).catch(() => {});
+    return c;
+  }
   function showHits(title, hits, label, note) {
     const checked = hits.map(() => true);
     const rows = hits.map((ht, i) => {
       const cb = h('input', { type: 'checkbox', checked: true, onchange: () => { checked[i] = cb.checked; sync(); } });
       return h('label.hit-row', cb, h('span.hit-num', numLabel(i + 1)),
-        h('span.hit-main', h('span.hit-ctx', ht.pre, h('mark', ht.text || '（色の付いた部分）'), ht.post),
+        h('span.hit-main', ht.text ? h('span.hit-ctx', ht.pre, h('mark', ht.text), ht.post) : cropOf(ht),
           h('span.hit-meta', `${ht.pageIndex + 1}ページ目${ht.line >= 0 ? `・${ht.line + 1}行目` : ''}`, ht.why ? h('span.why', `根拠: ${ht.why}`) : null)));
     });
     const applyBtn = h('button.btn.primary', { onclick: () => { close(); applyHits(hits.filter((_, i) => checked[i]), label); } });

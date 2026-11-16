@@ -191,6 +191,7 @@ button:disabled { opacity: .42; cursor: default; }
 .scan-stage { flex: 1; position: relative; min-height: 0; } .scan-canvas { position: absolute; inset: 0; touch-action: none; display: block; }
 .scan-bar { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
 .scan-bar .btn:not(.primary) { background: rgba(255, 255, 255, .14); border-color: transparent; color: #fff; }
+.hit-crop { display: block; border-radius: 6px; border: 1px solid var(--line); max-width: 100%; }
 /* マーカーの色えらび */
 .mk-sw { border-radius: 50%; display: block; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(40, 48, 80, .18); flex: none; }
 .mk-btn { flex: none; display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 10px 0 8px; border-radius: 12px; background: var(--soft); font-size: 12px; font-weight: 700; color: var(--muted); } .mk-btn[aria-expanded="true"] { background: #e7ecff; color: var(--primary-d); }
