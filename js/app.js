@@ -76,7 +76,19 @@ function askText(title, value = '', placeholder = '') {
   });
 }
 // フォルダは教材の「folder」に名前を持たせるだけ（教材が1つも無くなったフォルダは自然に消える）
-const foldersOf = (decks) => [...new Set(decks.map((d) => d.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
+// フォルダは教材の「folder」にパス（例: 英語/文法/時制）を持たせるだけ。教材が1つも無くなったフォルダは自然に消える
+const foldersOf = (decks) => { const set = new Set(); for (const d of decks) if (d.folder) d.folder.split('/').forEach((_, k, a) => set.add(a.slice(0, k + 1).join('/'))); return [...set].sort((a, b) => a.localeCompare(b, 'ja')); };
+const inFolder = (d, f) => d.folder === f || (d.folder || '').startsWith(f + '/');
+const folderLabel = (f) => f.split('/').join(' › ');
+const cleanName = (n) => (n || '').trim().replace(/\//g, '／');
+// 新しいフォルダをどこに作るか選んでもらう。'' = いちばん上、null = やめる
+function askParent(folders) {
+  return new Promise((res) => {
+    let done = false; const fin = (v) => { if (done) return; done = true; close(); res(v); };
+    const close = sheet('どこに作りますか？', h('div.col.gap', h('button.choice', { onclick: () => fin('') }, h('strong', 'いちばん上に作る')),
+      folders.map((p) => h('button.choice', { onclick: () => fin(p) }, h('strong', `「${folderLabel(p)}」の中に作る`)))), { onClose: () => fin(null) });
+  });
+}
 
 // ---------------- ホーム ----------------
 async function homeScreen() {
@@ -115,11 +127,21 @@ async function homeScreen() {
     h('main.content', hero,
       h('div.sec-head', h('h2', '教材'), decks.length ? null : h('button.btn', { onclick: async () => { const b = busy('サンプル教材を用意しています…'); try { const d = await createSampleDeck(); const ps = await db.pagesOf(d.id); nav.edit(d.id, ps[0].id); } finally { b.done(); } } }, icon('sparkle', 16), 'サンプルで試す')),
       h('div.deck-grid', add, decks.map((d, i) => (d.folder ? null : cards[i]))),
-      folders.map((f) => { const list = decks.map((d, i) => (d.folder === f ? cards[i] : null)).filter(Boolean), due = decks.filter((d) => d.folder === f).reduce((n, d) => n + stat.get(d.id).due, 0);
-        return h('details.folder', { open: !closed.includes(f), ontoggle: async (e) => { const c = (await getSettings()).closedFolders || []; await saveSettings({ closedFolders: e.target.open ? c.filter((x) => x !== f) : [...new Set([...c, f])] }); } },
-          h('summary', icon('folder', 18), h('strong', f), h('span.muted', `${list.length}件`), due ? h('span.badge.inline', `復習 ${due}`) : null,
-            h('button.icon-btn.sm', { 'aria-label': `フォルダ「${f}」の名前を変える`, title: '名前を変える', onclick: async (e) => { e.preventDefault(); const n = await askText('フォルダの名前', f); if (n == null || n === f) return; for (const d of decks) if (d.folder === f) { d.folder = n; await db.putDeck(d); } toast(n ? `「${n}」に変えました` : 'フォルダをなくしました（教材は残っています）'); homeScreen(); } }, icon('edit', 15))),
-          h('div.deck-grid', list)); }),
+      folders.filter((f) => !f.includes('/')).map(function renderFolder(f) {
+        const name = f.split('/').pop(), parent = f.split('/').slice(0, -1).join('/');
+        const direct = decks.map((d, k) => (d.folder === f ? cards[k] : null)).filter(Boolean), all = decks.filter((d) => inFolder(d, f)), due = all.reduce((n, d) => n + stat.get(d.id).due, 0);
+        const kids = folders.filter((x) => x.startsWith(f + '/') && !x.slice(f.length + 1).includes('/'));
+        const rename = async (e) => {
+          e.preventDefault(); const raw = await askText('フォルダの名前', name); if (raw == null) return; const n = cleanName(raw); if (n === name) return;
+          const np = n ? (parent ? parent + '/' + n : n) : parent; // 名前を空にしたら、この段だけなくして中身を1つ上へ
+          for (const d of all) { d.folder = (np + d.folder.slice(f.length)).replace(/^\//, ''); await db.putDeck(d); }
+          toast(n ? `「${n}」に変えました` : 'フォルダをなくしました（中の教材は残っています）'); homeScreen();
+        };
+        return h('details.folder', { open: !closed.includes(f), ontoggle: async (e) => { if (e.target !== e.currentTarget) return; const c = (await getSettings()).closedFolders || []; await saveSettings({ closedFolders: e.target.open ? c.filter((x) => x !== f) : [...new Set([...c, f])] }); } },
+          h('summary', icon('folder', 18), h('strong', name), h('span.muted', `${all.length}件`), due ? h('span.badge.inline', `復習 ${due}`) : null,
+            h('button.icon-btn.sm', { 'aria-label': `フォルダ「${name}」の名前を変える`, title: '名前を変える', onclick: rename }, icon('edit', 15))),
+          direct.length ? h('div.deck-grid', direct) : null, kids.map(renderFolder));
+      }),
       decks.length ? null : h('div.empty', h('p', 'いつもの教材を「答えの所だけ隠せる教材」に変えて、そのまま暗記・復習までできます。'),
         h('ol.steps', h('li', h('b', '取り込む'), '写真・画像・PDF'), h('li', h('b', '隠す'), 'なぞる／「光合成を隠して」と頼む'), h('li', h('b', '覚える'), 'タイマー → 自動で隠れてテスト'), h('li', h('b', '続ける'), '忘れかけた頃に復習・コインでごほうび'))),
       pick, cam),
@@ -158,9 +180,13 @@ async function deckScreen(id) {
   const allFolders = foldersOf(await db.decks());
   const folderSel = h('select.text-in.folder-in', { 'aria-label': 'フォルダ', onchange: async (e) => {
     let v = e.target.value;
-    if (v === '\u0000new') { v = await askText('新しいフォルダの名前', '', '例: 英語、日本史'); if (!v) return deckScreen(id); }
-    deck.folder = v; await db.putDeck(deck); toast(v ? `フォルダ「${v}」に入れました` : 'フォルダから出しました'); deckScreen(id);
-  } }, h('option', { value: '', selected: !deck.folder }, 'フォルダなし'), allFolders.map((f) => h('option', { value: f, selected: deck.folder === f }, f)), h('option', { value: '\u0000new' }, '＋ 新しいフォルダ…'));
+    if (v === '\u0000new') {
+      const name = cleanName(await askText('新しいフォルダの名前', '', '例: 英語、文法')); if (!name) return deckScreen(id);
+      const parent = allFolders.length ? await askParent(allFolders) : ''; if (parent == null) return deckScreen(id);
+      v = parent ? parent + '/' + name : name;
+    }
+    deck.folder = v; await db.putDeck(deck); toast(v ? `フォルダ「${folderLabel(v)}」に入れました` : 'フォルダから出しました'); deckScreen(id);
+  } }, h('option', { value: '', selected: !deck.folder }, 'フォルダなし'), allFolders.map((p) => h('option', { value: p, selected: deck.folder === p }, '\u3000'.repeat(p.split('/').length - 1) + (p.includes('/') ? '└ ' : '') + p.split('/').pop())), h('option', { value: '\u0000new' }, '＋ 新しいフォルダ…'));
 
   const pageCards = pages.map((p) => h('div.page-card',
     h('button.page-thumb', { onclick: () => nav.edit(id, p.id), 'aria-label': `${p.index + 1}ページ目を編集` }, h('img', { src: p.thumb, alt: '' }), maskOverlay(p)),

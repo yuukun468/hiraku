@@ -197,6 +197,7 @@ button:disabled { opacity: .42; cursor: default; }
 .folder > summary::after { content: "▾"; margin-left: auto; color: var(--muted); transition: transform .15s; } .folder:not([open]) > summary::after { transform: rotate(-90deg); }
 .folder > summary .muted { font-size: 12px; } .folder > .deck-grid { margin-top: 8px; } .dark-wall .folder > summary { color: #fff; }
 .badge.inline { position: static; } .folder-in { width: auto; min-width: 130px; max-width: 220px; }
+.folder .folder { margin: 6px 0 0 10px; padding-left: 12px; border-left: 2px solid rgba(120, 130, 160, .28); } .folder .folder > summary { font-size: 15px; }
 /* マーカーの色えらび */
 .mk-sw { border-radius: 50%; display: block; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(40, 48, 80, .18); flex: none; }
 .mk-btn { flex: none; display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 10px 0 8px; border-radius: 12px; background: var(--soft); font-size: 12px; font-weight: 700; color: var(--muted); } .mk-btn[aria-expanded="true"] { background: #e7ecff; color: var(--primary-d); }
