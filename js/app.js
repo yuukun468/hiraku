@@ -4,7 +4,7 @@ import { h, toast, sheet, confirmSheet, busy, DAY, todayKey, makeCanvas } from '
 import { icon } from './icons.js';
 import { importFiles, createSampleDeck, warmOcr } from './importer.js';
 import { openEditor } from './editor.js';
-import { openStudy, openQuiz, dueItems, strength, GRADES } from './study.js';
+import { openStudy, openQuiz, dueItems, strength, GRADES, forecast } from './study.js';
 import { getWallet, applyWallpaper, WALLPAPERS, MARKERS, COIN_RULES, buy, equip, markerFill, mergeWallet, owns } from './rewards.js';
 import { env, initPwa, onPwaChange, canInstall, promptInstall, swState, offlineInfo, saveOffline } from './pwa.js';
 import { aiTest } from './ai.js';
@@ -180,6 +180,17 @@ async function deckScreen(id) {
   const exam = h('input.date-in', { type: 'date', value: deck.examDate ? todayKey(deck.examDate) : '', 'aria-label': '試験日', onchange: async (e) => { deck.examDate = e.target.value ? new Date(e.target.value + 'T09:00').getTime() : null; await db.putDeck(deck); toast(deck.examDate ? '試験日に間に合うよう、復習の間隔を調整します' : '試験日を外しました'); deckScreen(id); } });
   const left = deck.examDate ? Math.ceil((deck.examDate - now) / DAY) : null;
   const allFolders = foldersOf(await db.decks());
+  // 試験日からの逆算: いまの定着の見込み・このまま何もしなかった場合の試験日の見込み・今日の目安
+  const fc = deck.examDate && deck.examDate > now ? forecast(all, deck.examDate, now) : null;
+  const plan = !fc ? null : h('div.plan',
+    h('div.plan-nums',
+      h('div', h('b', `${fc.nowPct}%`), h('small', 'いま覚えている見込み')),
+      h('div', h('b' + (fc.examPct < 60 ? '.low' : ''), `${fc.examPct}%`), h('small', 'このまま復習しないと、試験日には')),
+      h('div', h('b', fc.fresh ? `${fc.perDay}か所` : '0か所'), h('small', fc.fresh ? `今日、新しく覚える目安（未学習 ${fc.fresh}）` : '未学習はありません')),
+      h('div', h('b', `${fc.due}か所`), h('small', '今日の復習'))),
+    h('p.muted.small', fc.tight ? `試験まであと${fc.days}日で、未学習が ${fc.fresh}か所あります。全部は難しいので、「苦手を集中」と未学習の大事な所を優先しましょう。`
+      : fc.fresh ? `未学習を、最後の2日を総復習に空けて残りの日数で割った量です。毎日「今日の復習」を済ませてから、新しい所を ${fc.perDay}か所 進めると間に合います。`
+        : '新しく覚える所はもうありません。毎日「今日の復習」を済ませれば、試験日の見込みは上がっていきます。'));
   const folderSel = h('select.text-in.folder-in', { 'aria-label': 'フォルダ', onchange: async (e) => {
     let v = e.target.value;
     if (v === '\u0000new') {
@@ -206,6 +217,7 @@ async function deckScreen(id) {
           h('button.act', { disabled: !due, onclick: () => nav.review(id) }, icon('cal', 22), h('b', '今日の復習'), h('small', due ? `${due}か所` : 'なし')),
           h('button.act', { disabled: !(cnt.weak + cnt.mid), onclick: () => nav.studyDeck(id, 'weak') }, icon('map', 22), h('b', '苦手を集中'), h('small', `${cnt.weak + cnt.mid}か所`)),
           h('button.act', { disabled: !nq, onclick: () => nav.quiz(id) }, icon('cards', 22), h('b', '一問一答'), h('small', nq ? `${nq}問` : 'エディタで作成'))),
+        plan,
         h('div.row.between.wrap',
           h('label.exam', icon('folder', 16), 'フォルダ', folderSel),
           h('label.exam', icon('cal', 16), '試験日', exam, left != null ? h('b.left', left >= 0 ? `あと${left}日` : '終了') : h('span.muted', '入れると復習計画が試験日に合わせて変わります')),

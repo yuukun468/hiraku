@@ -544,6 +544,101 @@ function findMarks(m) {
   return { under: under.sort(order).map(toPage), boxed: boxed.sort(order).map(toPage) };
 }
 
+// 表のマスの中や、図に添えた短いことば（ラベル）を見つける。文章の行は対象外。
+// 返り値: 箱の配列（ページ座標）。表や図が無いページでは空
+export function labelRegions(m) {
+  if (m.labels) return m.labels;
+  return (m.labels = findLabels(m));
+}
+// 細くて長い横線（表の罫線・図の線）を画素の集まりとして取り出す。返り値: [{ x0, y0, x1, y1, pix }]
+function thinLines(m, minLen) {
+  const { W, H, ink } = m, T = m.textH, thinMax = Math.max(3, Math.round(T * 0.22)), thin = new Uint8Array(W * H);
+  for (let x = 0; x < W; x++) for (let y = 0; y < H;) {
+    if (!ink[y * W + x]) { y++; continue; }
+    const y0 = y; while (y < H && ink[y * W + x]) y++;
+    if (y - y0 <= thinMax) for (let j = y0; j < y; j++) thin[j * W + x] = 1;
+  }
+  const out = [], stack = [];
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (thin[s0] !== 1) continue;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0; const pix = []; stack.push(s0); thin[s0] = 2;
+    while (stack.length) {
+      const p = stack.pop(), x = p % W, y = (p / W) | 0; pix.push(p);
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if (X < 0 || Y < 0 || X >= W || Y >= H) continue; const z = Y * W + X; if (thin[z] === 1) { thin[z] = 2; stack.push(z); } }
+    }
+    const w = x1 - x0 + 1, hh = y1 - y0 + 1;
+    if (w < Math.min(minLen, T * 0.8) || hh > Math.max(T * 0.5, w * 0.08)) continue;
+    const cols = new Uint8Array(w); let cov = 0, yl = 0, nl = 0, yr = 0, nr = 0;
+    for (const p of pix) { const x = p % W, c = x - x0; if (!cols[c]) { cols[c] = 1; cov++; } if (x - x0 < 3) { yl += (p / W) | 0; nl++; } if (x1 - x < 3) { yr += (p / W) | 0; nr++; } }
+    if (cov / w >= 0.8) out.push({ x0, y0, x1, y1, pix, yl: yl / nl, yr: yr / nr });
+  }
+  // 交わる線のところで途切れた線（表の縦線が行ごとに切れる等）を、一直線に並んでいればつなぐ
+  out.sort((p, q) => p.x0 - q.x0);
+  for (let merged = true; merged;) {
+    merged = false;
+    outer: for (let i = 0; i < out.length; i++) for (let j = i + 1; j < out.length; j++) {
+      const p = out[i], q = out[j], gap = q.x0 - p.x1;
+      if (gap > T * 0.7) break; if (gap < -2 || Math.abs(p.yr - q.yl) > T * 0.25) continue;
+      out[i] = { x0: p.x0, y0: Math.min(p.y0, q.y0), x1: q.x1, y1: Math.max(p.y1, q.y1), pix: p.pix.concat(q.pix), yl: p.yl, yr: q.yr }; out.splice(j, 1); merged = true; break outer;
+    }
+  }
+  return out.filter((l) => l.x1 - l.x0 + 1 >= minLen);
+}
+function findLabels(m) {
+  const { W, H, ink, k } = m, T = m.textH;
+  // 1) 表の罫線・図の線（横と縦）を取りのぞく。字が線に触れていても、字の方は残る
+  const line = new Uint8Array(W * H), graphics = [];
+  let nh = 0, nv = 0; // 表や図らしさ: 長い横線と長い縦線の両方が2本以上あること（下線だけのページは対象外）
+  for (const l of thinLines(m, T * 2)) { for (const p of l.pix) line[p] = 1; graphics.push(l); if (l.x1 - l.x0 > T * 4) nh++; }
+  const tr = Object.assign(transposed(m), { textH: T });
+  for (const l of thinLines(tr, T * 2)) { for (const p of l.pix) line[(p % tr.W) * W + ((p / tr.W) | 0)] = 1; graphics.push({ x0: l.y0, y0: l.x0, x1: l.y1, y1: l.x1 }); if (l.x1 - l.x0 > T * 4) nv++; }
+  if (nh < 2 || nv < 2) return [];
+  const ink2 = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) ink2[i] = ink[i] && !line[i] ? 1 : 0;
+  const { lab, boxes } = components({ W, H, ink: ink2 });
+  // 2) 残ったかたまりのうち、字ではないもの（枠・かっこ・矢印・パンチ穴の影・ごみ）を外す
+  const kind = new Uint8Array(boxes.length); // 1 = 図形, 2 = ごみ
+  boxes.forEach((bx, i) => {
+    const w = bx.x1 - bx.x0 + 1, hh = bx.y1 - bx.y0 + 1, big = Math.max(w, hh), small = Math.min(w, hh);
+    if (bx.n < 4) kind[i] = 2;
+    else if ((w > T * 4 && hh > T * 2.6) || (big > T * 5 && small < T * 0.6) || (big > T * 3.2 && small > T * 1.2 && bx.n / (w * hh) < 0.06)) { kind[i] = 1; graphics.push(bx); }
+    else if (small > T * 0.9 && bx.n / (w * hh) > 0.62) kind[i] = 2;
+  });
+  // 3) 字の画素を横につなぐ。間に線や図形があれば、そこではつながない（表のマスをまたがない）
+  const gx = Math.max(3, Math.round(T * 1.4)), sm = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let last = -9999, blocked = false;
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x; if (line[i]) { blocked = true; continue; }
+      const id = lab[i]; if (!id) continue;
+      const kd = kind[id - 1]; if (kd === 1) { blocked = true; continue; } if (kd === 2) continue;
+      if (!blocked && x - last <= gx) for (let j = last + 1; j < x; j++) sm[y * W + j] = 1;
+      sm[i] = 1; last = x; blocked = false;
+    }
+  }
+  const gy = Math.max(1, Math.round(T * 0.2));
+  for (let x = 0; x < W; x++) { let last = -9999; for (let y = 0; y < H; y++) if (sm[y * W + x]) { if (y - last <= gy && y - last > 1) { let cut = false; for (let j = last + 1; j < y; j++) if (line[j * W + x]) { cut = true; break; } if (!cut) for (let j = last + 1; j < y; j++) sm[j * W + x] = 1; } last = y; } }
+  const out = [], stack = [];
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (sm[s0] !== 1) continue;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, n = 0; stack.push(s0); sm[s0] = 2;
+    while (stack.length) {
+      const p = stack.pop(), x = p % W, y = (p / W) | 0; if (ink2[p]) n++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && sm[p - 1] === 1) { sm[p - 1] = 2; stack.push(p - 1); } if (x < W - 1 && sm[p + 1] === 1) { sm[p + 1] = 2; stack.push(p + 1); }
+      if (y > 0 && sm[p - W] === 1) { sm[p - W] = 2; stack.push(p - W); } if (y < H - 1 && sm[p + W] === 1) { sm[p + W] = 2; stack.push(p + W); }
+    }
+    const w = x1 - x0 + 1, hh = y1 - y0 + 1;
+    if (hh < T * 0.5 || hh > T * 3.4 || w < T * 0.6 || w > T * 14 || n < Math.max(12, T)) continue; // 小さすぎ・文章の行は対象外
+    // 表や図のそば（線や図形の外接枠の中か、すぐ近く）にあるものだけ
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, near = T * 1.5;
+    if (!graphics.some((g) => cx >= g.x0 - near && cx <= g.x1 + near && cy >= g.y0 - near && cy <= g.y1 + near)) continue;
+    const pad = Math.max(1.5, hh * 0.1);
+    out.push({ x0: (x0 - pad) / k, y0: (y0 - pad) / k, x1: (x1 + 1 + pad) / k, y1: (y1 + 1 + pad) / k });
+  }
+  return out.sort((p, q) => (Math.abs(p.y0 - q.y0) < (p.y1 - p.y0) * 0.6 ? p.x0 - q.x0 : p.y0 - q.y0));
+}
+
 // ページにどの色がどれだけあるか（取込直後の「ワンタップ提案」用）
 export function colorSummary(m) {
   const out = [];
@@ -554,5 +649,6 @@ export function colorSummary(m) {
   const mk = markedRegions(m);
   if (mk.under.length) out.push({ name: m.vertical ? '傍線の語' : '下線の語', ids: ['under'], count: mk.under.length });
   if (mk.boxed.length) out.push({ name: '囲みの語', ids: ['boxed'], count: mk.boxed.length });
+  const lb = labelRegions(m); if (lb.length >= 3) out.push({ name: '表・図のラベル', ids: ['labels'], count: lb.length });
   return out;
 }

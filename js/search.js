@@ -151,6 +151,7 @@ export function parseCommand(input) {
   if (/(隠し|マスク|マーカー|かくし)を?(全部|すべて|全て)?(消|削除|クリア|外|はず)/.test(s) || /^(全部|すべて|全て)(消|削除|クリア)/.test(s)) return { kind: 'clear' };
   if (/(試験|テスト|出そう|でそう|問題に|問題を|クイズ|一問一答)/.test(s)) return { kind: 'questions', raw };
   if (/(重要|大事|だいじ|キーワード|大切|ポイント)/.test(s)) return { kind: 'important', raw };
+  if (/(ラベル|表の中|図の中|表のマス|地図の)/.test(s)) return { kind: 'color', ids: ['labels'], label: '表・図のラベル' };
   if (/(下線|傍線|波線|アンダーライン|線を引いた語|線の引いてある)/.test(s)) return { kind: 'color', ids: ['under'], label: '下線の語' };
   if (/(囲み|囲った|囲んだ|丸で囲|四角で囲|枠で囲|丸をつけた)/.test(s)) return { kind: 'color', ids: ['boxed'], label: '囲みの語' };
   if (/(赤字|赤い字|赤文字|赤色|赤いところ|赤の|オレンジ)/.test(s)) return { kind: 'color', ids: [1], label: '赤字' };

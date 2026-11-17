@@ -5,7 +5,7 @@ import { h, uid, toast, sheet, confirmSheet, busy, clamp, makeCanvas } from './u
 import { icon } from './icons.js';
 import { PageView, drawMask, bindPointers, zoomControls } from './view.js';
 import * as G from './geom.js';
-import { analyze, fitStroke, tightenBox, colorRegions, colorSummary, markedRegions, dropInk } from './ink.js';
+import { analyze, fitStroke, tightenBox, colorRegions, colorSummary, markedRegions, labelRegions, dropInk } from './ink.js';
 import { ensureText, ocrPage, replacePageImage } from './importer.js';
 import { adjustPhoto } from './scan.js';
 import { searchTerm, findEnglish, findNumbers, findImportantLocal, boxesToHits, parseSelection, parseCommand, clozeQuestions, norm } from './search.js';
@@ -343,7 +343,7 @@ export async function openEditor(root, { deckId, pageId, nav }) {
   }
   async function colorHits(ids, label) {
     const out = [];
-    for (const p of pages) { const m = await inkOf(p); out.push(...boxesToHits(p, ids[0] === 'under' ? markedRegions(m).under : ids[0] === 'boxed' ? markedRegions(m).boxed : colorRegions(m, ids), label)); }
+    for (const p of pages) { const m = await inkOf(p); out.push(...boxesToHits(p, ids[0] === 'under' ? markedRegions(m).under : ids[0] === 'boxed' ? markedRegions(m).boxed : ids[0] === 'labels' ? labelRegions(m) : colorRegions(m, ids), label)); }
     return out;
   }
   async function runCommand(text) {

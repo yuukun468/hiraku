@@ -29,6 +29,19 @@ export function schedule(srs, grade, examDate, now = Date.now()) {
 }
 export const GRADES = [{ label: 'まだ', sub: 'すぐもう一度', color: '#f03e3e', sym: '✕' }, { label: 'あいまい', sub: '近いうちに', color: '#f59f00', sym: '△' }, { label: '覚えた', sub: '間をあけて', color: '#2f9e44', sym: '◯' }];
 
+// いま（または指定の時刻に）思い出せる見込み 0〜1。未学習は 0
+export const recallAt = (srs, t) => (!srs || !srs.stab ? 0 : 1 / (1 + Math.max(0, (t - (srs.last || t)) / DAY) / (9 * srs.stab)));
+// 試験日からの逆算。masks: 隠しの配列。返り値は表示用の数字
+export function forecast(masks, examDate, now = Date.now()) {
+  const total = masks.length; if (!total) return null;
+  const days = Math.max(0, Math.ceil((examDate - now) / DAY));
+  const fresh = masks.filter((m) => !m.srs).length, due = masks.filter((m) => m.srs && m.srs.due <= now).length;
+  const avg = (t) => Math.round((masks.reduce((n, m) => n + recallAt(m.srs, t), 0) / total) * 100);
+  // 新しく覚える分は、最後の2日を総復習に空けて、残りの日数で均等に割る
+  const perDay = fresh ? Math.ceil(fresh / Math.max(1, days - 2)) : 0;
+  return { total, days, fresh, due, nowPct: avg(now), examPct: avg(examDate), perDay, tight: fresh > 0 && days <= 2 };
+}
+
 // 弱点の度合い: new / weak / mid / good
 export function strength(srs) {
   if (!srs) return 'new';
@@ -78,6 +91,11 @@ export async function openStudy(root, { deckId, pageId, mode = 'page', nav }) {
   const applyColors = () => { if (canFilter) items = allItems.filter((it) => colorsOn.has(mkId(maskOf(it)))); };
   applyColors();
   const shown = (m) => !canFilter || colorsOn.has(mkId(m)); // false = この色は今回は隠さない（そのまま見せる）
+  // 場所で覚えてしまうのを防ぐ出し方: 順番をばらばらにし、出題している所のまわりだけを見せる（ページのどこにあるかを手がかりにできない）
+  let mix = !!settings.studyMix && mode !== 'review';
+  const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const windowOf = (m) => { const b = G.bounds(m), w = b.x1 - b.x0, hh = b.y1 - b.y0;
+    return hh > w * 1.5 ? { x0: b.x0 - w * 3, y0: -1e5, x1: b.x1 + w * 3, y1: 1e5 } : { x0: -1e5, y0: b.y0 - hh * 2.3, x1: 1e5, y1: b.y1 + hh * 2.3 }; };
 
   let phase = mode === 'review' || mode === 'weak' ? 'test' : 'setup'; // setup → memorize → test → done
   let cur = 0, page = null, endAt = 0, paused = 0, timerId = 0, graded = 0, total = settings.timer;
@@ -110,6 +128,11 @@ export async function openStudy(root, { deckId, pageId, mode = 'page', nav }) {
         continue;
       }
       drawMask(ctx, m, marker, 'hidden', v, { ring: isCur ? 'rgba(76,110,245,.85)' : null });
+    }
+    if (mix && phase === 'test' && items[cur] && items[cur].pageId === page.id) { // まわり以外は紙の色でおおう
+      const wn = windowOf(maskOf(items[cur])), p = new Path2D();
+      p.rect(-1e5, -1e5, 2e5 + page.w, 2e5 + page.h); p.rect(wn.x0, wn.y0, wn.x1 - wn.x0, wn.y1 - wn.y0);
+      ctx.save(); ctx.fillStyle = '#f1f0ea'; ctx.fill(p, 'evenodd'); ctx.restore();
     }
   };
 
@@ -150,8 +173,10 @@ export async function openStudy(root, { deckId, pageId, mode = 'page', nav }) {
           await saveSettings({ offColors: [...new Set([...(settings.offColors || []).filter((x) => !colorCount.has(x)), ...[...colorCount.keys()].filter((x) => !colorsOn.has(x))])] });
           applyColors(); cur = 0; render();
         } }, markerSwatch(markerById(id), 20), h('span', markerById(id).name), h('small', colorsOn.has(id) ? `${n}か所・隠す` : '隠さない')))) : null;
+      const mixRow = mode === 'review' ? null : h('div.color-pick', h('span.cp-cap', '出し方'),
+        [[false, 'ページの順', '上から順に'], [true, 'ばらばら', 'まわりだけ見せて、順番もまぜる']].map(([v, l, sub]) => h('button.cp-chip', { 'aria-pressed': String(mix === v), onclick: async () => { mix = v; await saveSettings({ studyMix: v }); render(); } }, h('span', l), h('small', sub))));
       panel.replaceChildren(h('div.st-card', h('h3', 'まず、答えを見ながら覚えよう'), h('p.muted', '時間になると自動で隠れて、テストが始まります。'),
-        colorRow, seg, h('div.row.center', h('span.muted', '自分で決める'), custom, h('span.muted', '秒')),
+        colorRow, mixRow, seg, h('div.row.center', h('span.muted', '自分で決める'), custom, h('span.muted', '秒')),
         h('div.row.center', h('button.btn', { onclick: () => { phase = 'test'; start(); } }, 'すぐテストする'),
           h('button.btn.primary.big', { onclick: async () => { await saveSettings({ timer: total }); phase = 'memorize'; endAt = total ? Date.now() + total * 1000 : 0; paused = 0; render(); } }, icon('play', 18), '覚えるスタート'))));
       showPageOf(items[0]); view.draw(); return;
@@ -190,7 +215,8 @@ export async function openStudy(root, { deckId, pageId, mode = 'page', nav }) {
     }
   }
 
-  async function start() { cur = items.findIndex((it) => it.grade == null); if (cur < 0) cur = 0; await showPageOf(items[cur], mode !== 'page' || view.cw < 560); render(); }
+  let mixed = false;
+  async function start() { if (mix && !mixed) { mixed = true; items = shuffle(items.slice()); } cur = items.findIndex((it) => it.grade == null); if (cur < 0) cur = 0; await showPageOf(items[cur], mix || mode !== 'page' || view.cw < 560); render(); }
   function reveal() { items[cur].state = 'open'; render(); }
   async function grade(g) {
     const it = items[cur], p = pageById.get(it.pageId), m = maskOf(it);
@@ -200,7 +226,7 @@ export async function openStudy(root, { deckId, pageId, mode = 'page', nav }) {
     let next = -1;
     for (let k = 1; k <= items.length; k++) { const j = (cur + k) % items.length; if (items[j].grade == null) { next = j; break; } }
     if (next < 0) return finish();
-    cur = next; await showPageOf(items[cur], mode !== 'page' || view.cw < 560); render();
+    cur = next; await showPageOf(items[cur], mix || mode !== 'page' || view.cw < 560); render();
   }
   async function finishEarly() { if (graded && phase === 'test') return finish(); back(); }
   async function finish() {
