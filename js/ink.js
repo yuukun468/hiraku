@@ -73,6 +73,9 @@ export function analyze(pageId, img, pw, ph) {
   const map = { W, H, k, ink, cls, dark, textH: 0, vertical: false };
   map.vertical = detectVertical(map);
   map.textH = map.vertical ? estimateTextHeight(transposed(map)) : estimateTextHeight(map);
+  // 行の見積りは、字が少ないページ（図だけ・表だけ）で外れることがある。字のかたまりの大きさからも見積もって、大きく食い違うときはそちらを採る
+  map.textHRow = map.textH; map.textHComp = compTextHeight(map);
+  if (map.textHComp && (map.textH < map.textHComp * 0.6 || map.textH > map.textHComp * 2)) map.textH = map.textHComp;
   cache.set(pageId, map);
   if (cache.size > 6) cache.delete(cache.keys().next().value);
   return map;
@@ -146,6 +149,13 @@ function oriented(m, run) {
   const mixed = Math.min(o.hor, o.ver) > 15 && Math.min(o.hor, o.ver) > Math.max(o.hor, o.ver) * 0.5;
   if (!mixed) return m.vertical ? run(T()).map(swapBox) : run(m);
   return [...run(m).filter((b) => !localVertical(m, b)), ...run(T()).map(swapBox).filter((b) => localVertical(m, b))];
+}
+
+// 字らしいかたまり（細長すぎず、極端に小さくも大きくもない）の大きさの代表値
+function compTextHeight(m) {
+  const { boxes } = components(m), sz = [];
+  for (const b of boxes) { const w = b.x1 - b.x0 + 1, h = b.y1 - b.y0 + 1, d = Math.max(w, h); if (d >= 8 && d <= Math.max(m.W, m.H) / 12 && w / h < 3 && h / w < 3 && b.n >= 12) sz.push(d); }
+  return sz.length >= 12 ? pct(sz, 0.6) : 0;
 }
 
 // 縦方向のインク連続長の代表値 ≒ 文字の高さの目安
@@ -580,6 +590,7 @@ function thinLines(m, minLen) {
     outer: for (let i = 0; i < out.length; i++) for (let j = i + 1; j < out.length; j++) {
       const p = out[i], q = out[j], gap = q.x0 - p.x1;
       if (gap > T * 0.7) break; if (gap < -2 || Math.abs(p.yr - q.yl) > T * 0.25) continue;
+      const lp = p.x1 - p.x0, lq = q.x1 - q.x0; if (!(Math.max(lp, lq) >= T * 2 || Math.min(lp, lq) >= T * 1.3)) continue; // 漢字の横画どうしを線としてつながない
       out[i] = { x0: p.x0, y0: Math.min(p.y0, q.y0), x1: q.x1, y1: Math.max(p.y1, q.y1), pix: p.pix.concat(q.pix), yl: p.yl, yr: q.yr }; out.splice(j, 1); merged = true; break outer;
     }
   }
@@ -593,7 +604,6 @@ function findLabels(m) {
   for (const l of thinLines(m, T * 2)) { for (const p of l.pix) line[p] = 1; graphics.push(l); if (l.x1 - l.x0 > T * 4) nh++; }
   const tr = Object.assign(transposed(m), { textH: T });
   for (const l of thinLines(tr, T * 2)) { for (const p of l.pix) line[(p % tr.W) * W + ((p / tr.W) | 0)] = 1; graphics.push({ x0: l.y0, y0: l.x0, x1: l.y1, y1: l.x1 }); if (l.x1 - l.x0 > T * 4) nv++; }
-  if (nh < 2 || nv < 2) return [];
   const ink2 = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) ink2[i] = ink[i] && !line[i] ? 1 : 0;
   const { lab, boxes } = components({ W, H, ink: ink2 });
   // 2) 残ったかたまりのうち、字ではないもの（枠・かっこ・矢印・パンチ穴の影・ごみ）を外す
@@ -602,8 +612,12 @@ function findLabels(m) {
     const w = bx.x1 - bx.x0 + 1, hh = bx.y1 - bx.y0 + 1, big = Math.max(w, hh), small = Math.min(w, hh);
     if (bx.n < 4) kind[i] = 2;
     else if ((w > T * 4 && hh > T * 2.6) || (big > T * 5 && small < T * 0.6) || (big > T * 3.2 && small > T * 1.2 && bx.n / (w * hh) < 0.06)) { kind[i] = 1; graphics.push(bx); }
-    else if (small > T * 0.9 && bx.n / (w * hh) > 0.62) kind[i] = 2;
+    else if ((small > T * 0.9 && bx.n / (w * hh) > 0.86) || (small > T * 1.7 && bx.n / (w * hh) > 0.62)) kind[i] = 2; // べた塗り（パンチ穴の影など）。画数の多い太字の漢字は残す
   });
+  // 写真のようにざらざらした画像は対象外（字と模様を見分けられない）
+  if (boxes.length > 5000) return [];
+  const bigShape = boxes.some((bx, i) => kind[i] === 1 && Math.max(bx.x1 - bx.x0, bx.y1 - bx.y0) > T * 10 && Math.min(bx.x1 - bx.x0, bx.y1 - bx.y0) > T * 3 && bx.n / ((bx.x1 - bx.x0 + 1) * (bx.y1 - bx.y0 + 1)) < 0.08);
+  if (!((nh >= 2 && nv >= 2) || bigShape)) return [];
   // 3) 字の画素を横につなぐ。間に線や図形があれば、そこではつながない（表のマスをまたがない）
   const gx = Math.max(3, Math.round(T * 1.4)), sm = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
@@ -631,8 +645,10 @@ function findLabels(m) {
     const w = x1 - x0 + 1, hh = y1 - y0 + 1;
     if (hh < T * 0.5 || hh > T * 3.4 || w < T * 0.6 || w > T * 14 || n < Math.max(12, T)) continue; // 小さすぎ・文章の行は対象外
     // 表や図のそば（線や図形の外接枠の中か、すぐ近く）にあるものだけ
-    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, near = T * 1.5;
-    if (!graphics.some((g) => cx >= g.x0 - near && cx <= g.x1 + near && cy >= g.y0 - near && cy <= g.y1 + near)) continue;
+    // 紙の端にある、べったり濃いかたまりはパンチ穴の影
+    if (n / (w * hh) > 0.22 && (x0 < W * 0.07 || x1 > W * 0.93 || y0 < H * 0.05 || y1 > H * 0.95)) continue;
+    const near = T * 2.5; // 箱どうしのすき間で測る
+    if (!graphics.some((g) => x1 >= g.x0 - near && x0 <= g.x1 + near && y1 >= g.y0 - near && y0 <= g.y1 + near)) continue;
     const pad = Math.max(1.5, hh * 0.1);
     out.push({ x0: (x0 - pad) / k, y0: (y0 - pad) / k, x1: (x1 + 1 + pad) / k, y1: (y1 + 1 + pad) / k });
   }
