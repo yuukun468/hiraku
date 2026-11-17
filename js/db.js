@@ -1,5 +1,5 @@
 // 端末内保存 (IndexedDB)。教材の原本画像は変更せず、マスクと学習履歴を別に持つ。
-const NAME = 'hiraku-db', VER = 1;
+const NAME = globalThis.__HIRAKU_DB__ || 'hiraku-db', VER = 1; // 自動採点（tests/）は別の名前を使い、本物のデータに触れない
 let dbp = null;
 function open() {
   if (!dbp) dbp = new Promise((res, rej) => {

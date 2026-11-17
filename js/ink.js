@@ -448,7 +448,8 @@ function findMarks(m) {
   const minDark = Math.max(40, (dsamp.length ? pct(dsamp, 0.5) : 60) * 0.6);
   // ノートの罫線がある行: 薄くて細い画素が、その行に横に広くたまっている
   const ruleRow = new Uint8Array(H);
-  for (let y = 0; y < H; y++) { let c = 0; for (let x = 0; x < W; x++) { const i = y * W + x; if (thin[i] && dark[i] < minDark * 1.15) c++; } if (c > W * 0.07) for (let j = Math.max(0, y - 2); j <= Math.min(H - 1, y + 2); j++) ruleRow[j] = 1; }
+  // （罫線は紙の幅いっぱいに続く。1語ぶんの下線のふちのにじみと区別するため、横への広がりも見る）
+  for (let y = 0; y < H; y++) { let c = 0, xa = W, xb = 0; for (let x = 0; x < W; x++) { const i = y * W + x; if (thin[i] && dark[i] < minDark * 1.15) { c++; if (x < xa) xa = x; xb = x; } } if (c > W * 0.07 && xb - xa > W * 0.4) for (let j = Math.max(0, y - 2); j <= Math.min(H - 1, y + 2); j++) ruleRow[j] = 1; }
   let segs = []; const stack = [];
   for (let s0 = 0; s0 < W * H; s0++) {
     if (thin[s0] !== 1) continue;
@@ -465,8 +466,8 @@ function findMarks(m) {
     const w = x1 - x0 + 1, hh = y1 - y0 + 1;
     if (w < T * 0.6 || w > W * 0.6 || hh > Math.max(T * 0.4, w * 0.1)) continue;
     // うすい罫線は除く。罫線の上に字が乗っていると平均は濃くなるので、線の中の「薄い方の4分の1」で見る
-    if (col / n < 0.5 && (dsum / n < minDark || pct(pix.map((p) => dark[p]), 0.25) < minDark * 0.8)) continue;
-    if (col / n < 0.5 && ruleRow[(y0 + y1) >> 1] && dsum / n < minDark * 1.4) continue; // 罫線の上にある線は、はっきり濃いものだけ下線とみなす
+    if (col / n < 0.5 && dsum / n < minDark) continue;
+    if (col / n < 0.5 && ruleRow[(y0 + y1) >> 1] && (dsum / n < minDark * 1.4 || pct(pix.map((p) => dark[p]), 0.25) < minDark * 0.8)) continue; // 罫線の上にある線は、はっきり濃いものだけ下線とみなす
     const cols = new Uint8Array(w); let cov = 0; for (const p of pix) { const c = (p % W) - x0; if (!cols[c]) { cols[c] = 1; cov++; } }
     if (cov / w < 0.85) continue;
     segs.push({ x0, y0, x1, y1, d: Math.round(dsum / n), q: pct(pix.map((p) => dark[p]), 0.25), c: +(col / n).toFixed(2) });
@@ -489,6 +490,9 @@ function findMarks(m) {
     let big = false;
     for (let x = sg.x0; x <= sg.x1 && !big; x += 3) for (let y = sg.y0; y <= sg.y1; y++) { const id = comp.lab[y * W + x]; if (id) { const cb = comp.boxes[id - 1], ch = cb.y1 - cb.y0 + 1; if ((ch > T * 4 && cb.x1 - cb.x0 > T * 4) || (ch > w * 0.55 && cb.x1 - cb.x0 < w * 1.6)) big = true; break; } }
     if (big) continue;
+    let inChar = 0, cols2 = 0;
+    for (let x = sg.x0; x <= sg.x1; x++) for (let y = sg.y0; y <= sg.y1; y++) { const id = comp.lab[y * W + x]; if (!id) continue; cols2++; const cb = comp.boxes[id - 1], ch = cb.y1 - cb.y0 + 1, cw = cb.x1 - cb.x0 + 1; if (ch > thinMax * 3 && ch >= cw * 0.5) inChar++; break; }
+    if (cols2 && inChar / cols2 > 0.3) continue;
     // その場所の字の大きさ（ページの中で字の大きさが違っても合うように、線の上にあるかたまりから見積もる）
     const near = [];
     for (const cb of comp.boxes) {
