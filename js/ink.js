@@ -646,12 +646,15 @@ function findLabels(m) {
     if (hh < T * 0.5 || hh > T * 3.4 || w < T * 0.6 || w > T * 14 || n < Math.max(12, T)) continue; // 小さすぎ・文章の行は対象外
     // 表や図のそば（線や図形の外接枠の中か、すぐ近く）にあるものだけ
     // 紙の端にある、べったり濃いかたまりはパンチ穴の影
-    if (n / (w * hh) > 0.22 && (x0 < W * 0.07 || x1 > W * 0.93 || y0 < H * 0.05 || y1 > H * 0.95)) continue;
+    const atEdge = x0 < W * 0.07 || x1 > W * 0.93 || y0 < H * 0.05 || y1 > H * 0.95;
+    if (atEdge && (n / (w * hh) > 0.22 || (w < hh * 3 && hh < w * 3 && hh > T * 0.8))) continue;
     const near = T * 2.5; // 箱どうしのすき間で測る
     if (!graphics.some((g) => x1 >= g.x0 - near && x0 <= g.x1 + near && y1 >= g.y0 - near && y0 <= g.y1 + near)) continue;
     const pad = Math.max(1.5, hh * 0.1);
     out.push({ x0: (x0 - pad) / k, y0: (y0 - pad) / k, x1: (x1 + 1 + pad) / k, y1: (y1 + 1 + pad) / k });
   }
+  // 矢印や囲みが入り組んだノート（表や図ではない）では、ページ中の語を拾ってしまう。数が多すぎるときは「表・図ではない」と見て何も出さない
+  if (out.length > 70) return [];
   return out.sort((p, q) => (Math.abs(p.y0 - q.y0) < (p.y1 - p.y0) * 0.6 ? p.x0 - q.x0 : p.y0 - q.y0));
 }
 
